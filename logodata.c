@@ -90,7 +90,8 @@ char *noparity_strnzcpy(char *s1, char *s2, int n) {
     int i;
 
     for (i = 0; i < n; i++)
-	s1[i] = clearparity(s2[i]);
+	/* Only clear parity for ASCII bytes; pass UTF-8 high bytes unchanged */
+	s1[i] = ((unsigned char)s2[i] < 0x80) ? clearparity(s2[i]) : s2[i];
     s1[n] = '\0';
     return(s1);
 }
@@ -99,7 +100,7 @@ char *backslashed_strnzcpy(char *s1, char *s2, int n) {
     int i,j;
 
     for (i = 0, j = 0; i < n; i++) {
-	if (getparity(s2[i]))
+	if ((unsigned char)s2[i] < 0x80 && getparity(s2[i]))
 	    s1[j++] = '\\';
 	s1[j++] = clearparity(s2[i]);
     }
@@ -210,11 +211,16 @@ char *noparitylow_strnzcpy(char *s1, char *s2, int n) {
     char c, *temp = s1;
 
     for (i = 0; i < n; i++) {
-	c = clearparity(*s2++);
-	if (upper_p(c))
-	    *s1++ = uncapital(c);
-	else
-	    *s1++ = c;
+	if ((unsigned char)s2[i] >= 0x80) {
+	    /* UTF-8 byte: pass through unchanged, do not lowercase or strip parity */
+	    *s1++ = s2[i];
+	} else {
+	    c = clearparity(s2[i]);
+	    if (upper_p(c))
+		*s1++ = uncapital(c);
+	    else
+		*s1++ = c;
+	}
     }
     *s1 = '\0';
     return(temp);
@@ -247,9 +253,13 @@ int noparity_strncmp(char *s1, char *s2, int n) {
     int i;
 
     for (i = 0; i < n; i++) {
-	if (clearparity(*s1) != clearparity(*s2))
-	    return(clearparity(*s1) - clearparity(*s2));
-	s1++, s2++;
+	unsigned char c1 = (unsigned char)s1[i];
+	unsigned char c2 = (unsigned char)s2[i];
+	/* Only clear parity for ASCII bytes; compare UTF-8 high bytes as-is */
+	char cc1 = (c1 < 0x80) ? clearparity(s1[i]) : (char)c1;
+	char cc2 = (c2 < 0x80) ? clearparity(s2[i]) : (char)c2;
+	if (cc1 != cc2)
+	    return((unsigned char)cc1 - (unsigned char)cc2);
     }
     return(0);
 }
@@ -259,6 +269,12 @@ int noparitylow_strncmp(char *s1, char *s2, int n) {
     char c1, c2;
 
     for (i = 0; i < n; i++) {
+	/* Pass UTF-8 high bytes through unchanged; only apply parity/case for ASCII */
+	if ((unsigned char)s1[i] >= 0x80 || (unsigned char)s2[i] >= 0x80) {
+	    if ((unsigned char)s1[i] != (unsigned char)s2[i])
+		return((unsigned char)s1[i] - (unsigned char)s2[i]);
+	    continue;
+	}
 	c1 = clearparity(*s1);
 	c2 = clearparity(*s2);
 	if (c1 != c2) {

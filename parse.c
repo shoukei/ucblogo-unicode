@@ -411,7 +411,8 @@ NODE *parser_iterate(char **inln, char *inlimit, struct string_block *inhead,
 	}
 
 	/* flag that this word will be of BACKSLASH_STRING type */
-	if (getparity(ch)) this_type = BACKSLASH_STRING;
+	/* Only ASCII bytes carry the parity flag; UTF-8 high bytes must pass through */
+	if ((unsigned char)ch < 0x80 && getparity(ch)) this_type = BACKSLASH_STRING;
 
 	if (ch == '|') {
 	    vbar = !vbar;
@@ -535,7 +536,7 @@ NODE *runparse_node(NODE *nd, NODE **ndsptr) {
 	    tptr = ++wptr;
 	    wcnt++;
 	    while (wcnt < wlen && !parens(*wptr)) {
-		if (wtyp == BACKSLASH_STRING && getparity(*wptr))
+		if (wtyp == BACKSLASH_STRING && (unsigned char)*wptr < 0x80 && getparity(*wptr))
 		    wtyp = PUNBOUND;    /* flag for "\( case */
 		wptr++, wcnt++, tcnt++;
 	    }
