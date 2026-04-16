@@ -1,5 +1,44 @@
 # UCBLogo
 
+## About this fork
+
+This is a fork of https://github.com/jrincayc/ucblogo-code
+
+It has been modified to work with unicode characters.
+
+```
+	? pr first "あいうえお
+	あ
+	? pr butfirst "あいうえお
+	いうえお
+	? pr last "あいうえお
+	お
+	? pr butlast "あいうえお
+	あいうえ
+	? pr count "あいうえお
+	5
+	? pr item 3 "あいうえお
+	う
+	? pr memberp "あ [あ い う]
+	true
+	? pr memberp "か [あ い う]
+	false
+	? pr fput "あ [い う え お]
+	あ い う え お
+	? pr lput "あ [い う え お]
+	い う え お あ
+```
+
+Since I like using logo from the terminal,
+I am running an X11 version without wxwidgets, building the project like this:
+
+```
+	autoreconf --install
+	./configure --enable-x11 --enable-objects
+	make
+```
+
+
 ## Berkeley Logo interpreter
 
 This is a free (both senses) interpreter for the Logo programming language.
