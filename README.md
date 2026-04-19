@@ -3,8 +3,7 @@
 ## About this fork
 
 This is a fork of https://github.com/jrincayc/ucblogo-code
-
-It has been modified to work with unicode characters.
+modified to work with unicode characters.
 
 ```
 	? pr first "あいうえお
@@ -25,12 +24,12 @@ It has been modified to work with unicode characters.
 	false
 	? pr fput "あ [い う え お]
 	あ い う え お
-	? pr lput "あ [い う え お]
-	い う え お あ
+	? pr lput "お [あ い う え]
+	あ い う え お
 ```
 
-Since I like using logo from the terminal,
-I am running an X11 version without wxwidgets, building the project like this:
+Since I use logo mostly from the terminal, with only occasional graphics 
+I am running an X11 version without wxwidgets, building ucblogo like this:
 
 ```
 	autoreconf --install
