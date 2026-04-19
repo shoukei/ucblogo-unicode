@@ -26,6 +26,10 @@
 #endif
 
 #include <wx/timer.h>
+#include <wx/caret.h>
+#ifdef __WXMAC__
+#include "wxTerminalIME.h"
+#endif
 extern std::string pathString;
 #include <wx/stdpaths.h>
 #include <ctype.h>
@@ -767,6 +771,7 @@ EVT_LEFT_UP(wxTerminal::OnLeftUp)
 EVT_MOTION(wxTerminal::OnMouseMove)
 //EVT_MY_CUSTOM_COMMAND(-1, wxTerminal::Flush)
 EVT_SIZE(wxTerminal::OnSize)
+EVT_SET_FOCUS(wxTerminal::OnFocus)
 EVT_KILL_FOCUS(wxTerminal::LoseFocus)
 END_EVENT_TABLE()
 
@@ -848,6 +853,18 @@ extern "C" void color_init(void);
   GetCharSize(&m_charWidth, &m_charHeight);
   //dc.GetTextExtent("M", &m_charWidth, &m_charHeight);
   //  m_charWidth--;
+
+  // Create a wxCaret so the caret position is tracked at the OS level.
+  // We keep it hidden (we draw our own cursor line in OnDraw).
+  wxCaret *ime_caret = new wxCaret(this, 1, m_charHeight);
+  SetCaret(ime_caret);
+  ime_caret->Show(false);
+
+#ifdef __WXMAC__
+  // Swizzle wxNSView's firstRectForCharacterRange:actualRange: stub so the
+  // macOS IME candidate window appears at the actual cursor position.
+  WxTerminalIME_Install();
+#endif
 
   m_inputReady = FALSE;
   m_inputLines = 0;
@@ -1100,39 +1117,27 @@ void wxTerminal::DoPaste(){
 		if (wxTheClipboard->IsSupported( wxDF_TEXT ))
 		{
 		  wxClientDC dc(this);
-
 		  wxTextDataObject data;
 		  wxTheClipboard->GetData( data );
 		  wxString s = data.GetText();
-		  
-		  int i; 
-		  //char chars[2];
-		  char c;
+
 		  int num_newlines = 0;
-		  int len;
+		  wxCharBuffer utf8text = s.utf8_str();
+		  const char *utf8ptr = utf8text.data();
+		  int utf8len = (int)strlen(utf8ptr);
 		  char prev = ' ';
-		  for (i = 0; i < s.Length() && input_index < MAXINBUFF; i++){
-		    len = 1;
-		    c = s.GetChar(i);
-		    if (c == '\n') {
-		      num_newlines++;
-		    }
-		    if (prev == ' ' && c == ' ') {
-		      continue;
-		    }
+		  for (int i = 0; i < utf8len && input_index < MAXINBUFF; i++) {
+		    char c = utf8ptr[i];
+		    if (c == '\n') num_newlines++;
+		    if (prev == ' ' && c == ' ') continue;
 		    prev = c;
-		    if(input_index < MAXINBUFF) {
-		      input_buffer[input_index++] = c;
-		    }
-		    else {
-		      break;
-		    }
+		    input_buffer[input_index++] = c;
 		    ClearSelection();
-		    PassInputToTerminal(len, &c);
+		    PassInputToTerminal(1, &c);
 		  }
 		  m_inputLines = num_newlines;
 		  input_current_pos = input_index;
-		}  
+		}
 		wxTheClipboard->Close();
 	}
 	
@@ -1140,6 +1145,17 @@ void wxTerminal::DoPaste(){
 
 
 void wxTerminal::LoseFocus (wxFocusEvent & event) {
+}
+
+void wxTerminal::OnFocus (wxFocusEvent & event) {
+  // Let wxWidgets process the focus event normally first.
+  event.Skip();
+#ifdef __WXMAC__
+  // Deactivate then reactivate the NSTextInputContext so macOS IME
+  // (e.g. Japanese Kana/Romaji) is properly re-initialized after the
+  // window regains focus from another application.
+  WxTerminalIME_ResetInputContext(GetHandle());
+#endif
 }
 
 
@@ -1194,23 +1210,38 @@ wxTerminal::OnChar(wxKeyEvent& event)
   else if (logo_input_mode == LogoCharInputMode) {
     if (keyCode == WXK_RETURN) {
       keyCode = '\n';
+      if (input_index < MAXINBUFF) {
+        input_buffer[input_index++] = (char)keyCode;
+        input_current_pos++;
+        PassInputToInterp();
+      }
     }
     else if (keyCode == WXK_BACK) {
       keyCode = 8;
+      if (input_index < MAXINBUFF) {
+        input_buffer[input_index++] = (char)keyCode;
+        input_current_pos++;
+        PassInputToInterp();
+      }
     }
     else if (keyCode >= WXK_START) {
-	/* ignore it */
-      return;  //not sure about this (evan)
-    } 
-    else {
-      
+      return;
     }
-    if (event.ControlDown()) keyCode &= 0237;
-    if (event.AltDown()) keyCode += 0200;
-    if(input_index < MAXINBUFF) {
-      input_buffer[input_index++] = keyCode;
-      input_current_pos++;
-      PassInputToInterp();
+    else {
+      if (event.ControlDown()) keyCode &= 0237;
+      if (event.AltDown())     keyCode += 0200;
+      wxChar uchar = event.GetUnicodeKey();
+      if (uchar == 0 || uchar == WXK_NONE) uchar = (wxChar)keyCode;
+      wxString ustr(uchar);
+      wxCharBuffer utf8buf = ustr.utf8_str();
+      int utf8len = (int)strlen(utf8buf.data());
+      if (utf8len <= 0 || utf8len > 6) utf8len = 1;
+      if (input_index + utf8len <= MAXINBUFF) {
+        memcpy(input_buffer + input_index, utf8buf.data(), utf8len);
+        input_index += utf8len;
+        input_current_pos += utf8len;
+        PassInputToInterp();
+      }
     }
   }
   else if (keyCode == WXK_RETURN) {
@@ -1283,48 +1314,66 @@ wxTerminal::OnChar(wxKeyEvent& event)
   else {
     if(input_index >= MAXINBUFF) return;	
 
-    buf[0] = keyCode;
-    len = 1;
+    // Encode the Unicode character to UTF-8 bytes
+    wxChar uchar = event.GetUnicodeKey();
+    if (uchar == 0 || uchar == WXK_NONE) uchar = (wxChar)keyCode;
+    wxString ustr(uchar);
+    wxCharBuffer utf8buf = ustr.utf8_str();
+    len = (int)strlen(utf8buf.data());
+    if (len <= 0 || len > 6) { len = 1; buf[0] = (char)keyCode; }
+    else { memcpy(buf, utf8buf.data(), len); }
+
+    if (input_index + len > MAXINBUFF) return;
+
     int doInsert = 0;
-    if (input_current_pos < input_index ) { // we are in the middle of input
+    if (input_current_pos < input_index) { // inserting in the middle
       doInsert = 1;
       int i;
-      for (i = input_index; i >= input_current_pos + 1; i--) {
-	input_buffer[i] = input_buffer[i - 1]; 
-      }
-      input_buffer[input_current_pos] = keyCode;
-      input_index++;
-      input_current_pos++;
+      for (i = input_index + len - 1; i >= input_current_pos + len; i--)
+        input_buffer[i] = input_buffer[i - len];
+      memcpy(input_buffer + input_current_pos, buf, len);
+      input_index += len;
+      input_current_pos += len;
     }
     else {
-      input_buffer[input_index++] = keyCode;
-      input_current_pos++;
+      memcpy(input_buffer + input_index, buf, len);
+      input_index += len;
+      input_current_pos += len;
     }
 
     if (doInsert) {
       cur_x = cursor_x; cur_y = cursor_y;
-
-
-      //remember, input_current_pos - 1 has last character typed
-      PassInputToTerminal(input_index - (input_current_pos - 1),
-			  (input_buffer + (input_current_pos - 1)));
-	
-      //now the cursor is where the last input position is
+      // Count Unicode characters from the insertion point to end of input
+      // (for line_length tracking: 1 char = 1 column regardless of byte count)
+      const char *tail = input_buffer + (input_current_pos - len);
+      int tail_bytes = input_index - (input_current_pos - len);
+      int tail_chars = 0;
+      for (int b = 0; b < tail_bytes; ) {
+        unsigned char lead = (unsigned char)tail[b];
+        int sl;
+        if      (lead < 0x80)            sl = 1;
+        else if ((lead & 0xE0) == 0xC0)  sl = 2;
+        else if ((lead & 0xF0) == 0xE0)  sl = 3;
+        else if ((lead & 0xF8) == 0xF0)  sl = 4;
+        else                             sl = 1;
+        tail_chars++;
+        b += sl;
+      }
+      // Directly rewrite the char buffer from the insertion point
+      RewriteLineFromCursor(tail, tail_bytes, tail_chars);
       last_input_x = cursor_x;
       last_input_y = cursor_y;
-	
-      //set cursor back to cursorPos
-      if (cur_x == x_max)
-	setCursor(0, cur_y + 1);
+      // Move cursor to just after the inserted character
+      if (cur_x + 1 > x_max)
+        setCursor(0, cur_y + 1);
       else
-	setCursor(cur_x+1, cur_y);
-    } 
+        setCursor(cur_x + 1, cur_y);
+    }
     else {
       PassInputToTerminal(len, buf);
-      //now the cursor is where the last input position is
       last_input_x = cursor_x;
-      last_input_y = cursor_y;	
-    }   
+      last_input_y = cursor_y;
+    }
   }
 
   if(!(m_currMode & DEFERUPDATE)) {
@@ -1334,67 +1383,131 @@ wxTerminal::OnChar(wxKeyEvent& event)
 }
 
 
+// Directly overwrites the terminal char buffer starting at curr_char_pos
+// with exactly `len` bytes from `data`, then pads with spaces up to the
+// old line_length, and updates line_length to the new character count.
+// This bypasses InsertChar entirely, avoiding its shift logic which is
+// designed for ASCII and breaks with multi-byte UTF-8 sequences.
+// `char_count` is the number of Unicode characters (= display columns)
+// represented by `len` bytes.
+void wxTerminal::RewriteLineFromCursor(const char *data, int len, int char_count) {
+  int old_line_length = line_of(curr_line_pos).line_length;
+  int start_x = cursor_x;
+  int new_line_length = start_x + char_count;
+
+  // Write the new bytes directly into the char buffer
+  wxterm_charpos pos = curr_char_pos;
+  for (int i = 0; i < len; i++) {
+    char_of(pos) = data[i];
+    mode_of(pos) = m_currMode;
+    inc_charpos(pos);
+  }
+
+  // Pad with spaces to erase any leftover characters from the old content
+  int pad = old_line_length - new_line_length;
+  for (int i = 0; i < pad; i++) {
+    char_of(pos) = ' ';
+    mode_of(pos) = m_currMode;
+    inc_charpos(pos);
+  }
+  // Write the terminating \n (or \0 if end of buffer)
+  // Preserve whatever was there after the old line
+  // (the \n was already in the buffer at old_line_length position)
+
+  // Update the line length to the new character count
+  line_of(curr_line_pos).line_length = new_line_length;
+
+  // Force a repaint of this line
+  if (!(m_currMode & DEFERUPDATE)) {
+    int vis_x, vis_y;
+    GetViewStart(&vis_x, &vis_y);
+    int line_on_screen = cursor_y - vis_y;
+    wxRect r(0, line_on_screen * m_charHeight,
+             m_width * m_charWidth, m_charHeight);
+    Refresh(true, &r);
+  }
+}
+
+// Returns byte-length of the UTF-8 sequence starting at buf[pos]
+static int utf8_seq_len_at(const char *buf, int pos) {
+  unsigned char lead = (unsigned char)buf[pos];
+  if      (lead < 0x80)            return 1;
+  else if ((lead & 0xE0) == 0xC0)  return 2;
+  else if ((lead & 0xF0) == 0xE0)  return 3;
+  else if ((lead & 0xF8) == 0xF0)  return 4;
+  else                             return 1; // continuation byte or invalid
+}
+
+// Returns byte-length of the UTF-8 sequence ending just before buf[pos],
+// by stepping back over continuation bytes (0x80-0xBF).
+static int utf8_prev_seq_len(const char *buf, int pos) {
+  if (pos <= 0) return 0;
+  int start = pos - 1;
+  while (start > 0 && ((unsigned char)buf[start] & 0xC0) == 0x80)
+    start--;
+  return pos - start;
+}
+
 void wxTerminal::handle_backspace() {
-  if (input_index == 0)
+  if (input_index == 0 || input_current_pos == 0)
     return;
-    
 
-  if (input_current_pos == 0)
-    return;
-    
-  bool removing_newline = FALSE;
-  if(input_buffer[input_current_pos-1] == '\n') {
-    removing_newline = TRUE;
-  }
-    
-  for (int i = input_current_pos; i < input_index; i++) {
-    input_buffer[i-1] = input_buffer[i]; 
-  }
-  input_index--;
-  input_current_pos--;
+  bool removing_newline = (input_buffer[input_current_pos - 1] == '\n');
 
-  cur_x = cursor_x - 1, cur_y = cursor_y;
-  if(cur_x < 0) {
+  // Determine byte-length of the previous UTF-8 character
+  int char_bytes = utf8_prev_seq_len(input_buffer, input_current_pos);
+  if (char_bytes < 1) char_bytes = 1;
+
+  // Remove char_bytes from input_buffer
+  for (int i = input_current_pos; i < input_index; i++)
+    input_buffer[i - char_bytes] = input_buffer[i];
+  input_index       -= char_bytes;
+  input_current_pos -= char_bytes;
+
+  // Move display cursor back exactly 1 column
+  cur_x = cursor_x - 1;
+  cur_y = cursor_y;
+  if (cur_x < 0) {
     wxterm_linepos cpos = GetLinePosition(cursor_y - 1);
-    // x_max if wrapped line,  line_length otherwise.
     cur_x = min(x_max, line_of(cpos).line_length);
     cur_y = cursor_y - 1;
-    setCursor(cur_x, cur_y);
   }
-  else {
-    setCursor(cur_x, cur_y);
-  }
-    
-  PassInputToTerminal(input_index - input_current_pos,
-		      input_buffer + input_current_pos);
-    
-  //cursor_x , cursor_y now at input's last location
-  last_input_x = cursor_x;
-  last_input_y = cursor_y;
-    
-    
-  if(removing_newline) {
-    //add a second newline, to erase contents of the last
-    //input line.
-    //this causes a very specific "feature"....
-    //if last input line contains other noninput chars
-    //then doing this will erase them too
-    //this situation can happen when you use setcursor and hit Backspace...
-    //it's a very specific situation that should not clash with 
-    //intended behavior...
+  setCursor(cur_x, cur_y);
+
+  if (removing_newline) {
+    // For newline removal, fall back to PassInputToTerminal
+    PassInputToTerminal(input_index - input_current_pos,
+                        input_buffer + input_current_pos);
+    last_input_x = cursor_x;
+    last_input_y = cursor_y;
     char nl = '\n';
     PassInputToTerminal(1, &nl);
-    PassInputToTerminal(1, &nl);  //pass two newlines
+    PassInputToTerminal(1, &nl);
+    m_inputLines--;
+  } else {
+    // Count Unicode characters from deletion point to end of input
+    const char *tail = input_buffer + input_current_pos;
+    int tail_bytes = input_index - input_current_pos;
+    int tail_chars = 0;
+    for (int b = 0; b < tail_bytes; ) {
+      unsigned char lead = (unsigned char)tail[b];
+      int sl;
+      if      (lead < 0x80)            sl = 1;
+      else if ((lead & 0xE0) == 0xC0)  sl = 2;
+      else if ((lead & 0xF0) == 0xE0)  sl = 3;
+      else if ((lead & 0xF8) == 0xF0)  sl = 4;
+      else                             sl = 1;
+      tail_chars++;
+      b += sl;
+    }
+    // Directly rewrite char buffer from cursor, erasing the deleted character
+    RewriteLineFromCursor(tail, tail_bytes, tail_chars);
+    last_input_x = cursor_x;
+    last_input_y = cursor_y;
+  }
 
-    m_inputLines--; //merged two lines
-  }
-  else {
-    char spc = ' ';
-    PassInputToTerminal(1, &spc);
-  }
-    
-  //set cursor back to backspace'd location
-  setCursor(cur_x,cur_y); 
+  // Restore cursor to deletion point
+  setCursor(cur_x, cur_y);
 }
 
 void wxTerminal::handle_home() {
@@ -1491,31 +1604,32 @@ void wxTerminal::update_command_from_history(const char *command_string) {
 }
 
 void wxTerminal::handle_left() {
-  if(input_current_pos > 0) {
-    if (cursor_x - 1 < 0) {	  
-      //if previous char is a newline, then cursor goes to line_length
-      //otherwise, it's a wrapped line, and should go to the end
-      // just use min...
+  if (input_current_pos > 0) {
+    int char_bytes = utf8_prev_seq_len(input_buffer, input_current_pos);
+    if (char_bytes < 1) char_bytes = 1;
+    input_current_pos -= char_bytes;
+
+    if (cursor_x - 1 < 0) {
       wxterm_linepos cpos = GetLinePosition(cursor_y - 1);
-      setCursor(min(x_max, line_of(cpos).line_length), cursor_y - 1);   
-    }   
-    else {
+      setCursor(min(x_max, line_of(cpos).line_length), cursor_y - 1);
+    } else {
       setCursor(cursor_x - 1, cursor_y);
     }
-    input_current_pos--;
   }
 }
 
 void wxTerminal::handle_right() {
-  if(input_current_pos < input_index) {
-    if (input_buffer[input_current_pos] == '\n' ||
-	cursor_x + 1 > x_max) {
+  if (input_current_pos < input_index) {
+    int char_bytes = utf8_seq_len_at(input_buffer, input_current_pos);
+    if (char_bytes < 1) char_bytes = 1;
+    bool is_newline = (input_buffer[input_current_pos] == '\n');
+    input_current_pos += char_bytes;
+
+    if (is_newline || cursor_x + 1 > x_max) {
       setCursor(0, cursor_y + 1);
+    } else {
+      setCursor(cursor_x + 1, cursor_y);
     }
-    else {
-      setCursor(cursor_x + 1, cursor_y);	  
-    }
-    input_current_pos++;
   }
 }
 
@@ -1561,8 +1675,21 @@ void wxTerminal::setCursor (int x, int y, bool fromLogo) {
      cursor_x > curr_char_pos.line_length) {
     cursor_x = curr_char_pos.line_length;
   }
-  curr_char_pos.offset = curr_char_pos.offset + cursor_x;
-  adjust_charpos(curr_char_pos);
+  // Walk the char buffer character-by-character (respecting UTF-8 multi-byte
+  // sequences) rather than adding cursor_x directly as a byte offset.
+  // cursor_x is a column count; each column may occupy 1-4 bytes in the buffer.
+  for (int col = 0; col < cursor_x; col++) {
+    unsigned char lead = (unsigned char)char_of(curr_char_pos);
+    int seq_len;
+    if      (lead == 0 || lead == '\n') break;  // end of line content
+    else if (lead < 0x80)               seq_len = 1;
+    else if ((lead & 0xE0) == 0xC0)     seq_len = 2;
+    else if ((lead & 0xF0) == 0xE0)     seq_len = 3;
+    else if ((lead & 0xF8) == 0xF0)     seq_len = 4;
+    else                                seq_len = 1;
+    for (int b = 0; b < seq_len; b++)
+      inc_charpos(curr_char_pos);
+  }
 
   if(fromLogo && 
      (cursor_x != want_x ||
@@ -1591,11 +1718,25 @@ void wxTerminal::setCursor (int x, int y, bool fromLogo) {
        cursor_y <= vis_y + m_height - 1) {
     }
     else {
-
       Scroll(-1, cursor_y);
-      
-      //      Refresh();
     }
+  }
+
+  // Keep wxCaret in sync and update the IME candidate window position.
+  {
+    int scroll_x, scroll_y;
+    GetViewStart(&scroll_x, &scroll_y);
+    int pixel_x = cursor_x * m_charWidth;
+    int pixel_y = (cursor_y - scroll_y) * m_charHeight;
+
+    if (GetCaret())
+      GetCaret()->Move(pixel_x, pixel_y);
+
+#ifdef __WXMAC__
+    // Update the screen-coordinate rect used by firstRectForCharacterRange:
+    // so the macOS IME candidate window follows the cursor.
+    WxTerminalIME_UpdateCaretRect(GetHandle(), pixel_x, pixel_y, m_charHeight);
+#endif
   }
 }
 
@@ -1676,8 +1817,25 @@ void wxTerminal::OnDraw(wxDC& dc)
   {
     tline = line_of(tlpos);
     for ( int col = 0; col < tline.line_length; col++ ) {
-      DrawText(dc, m_curFG, m_curBG, mode_of(tline), col, line, 1, &char_of(tline));
+      // Collect all bytes of this UTF-8 sequence before drawing
+      unsigned char lead = (unsigned char)char_of(tline);
+      int seq_len;
+      if      (lead < 0x80)            seq_len = 1;
+      else if ((lead & 0xE0) == 0xC0)  seq_len = 2;
+      else if ((lead & 0xF0) == 0xE0)  seq_len = 3;
+      else if ((lead & 0xF8) == 0xF0)  seq_len = 4;
+      else                             seq_len = 1;
+
+      char seq_buf[5];
+      seq_buf[0] = char_of(tline);
       inc_charpos(tline);
+      for (int b = 1; b < seq_len; b++) {
+        seq_buf[b] = char_of(tline);
+        inc_charpos(tline);
+      }
+      seq_buf[seq_len] = '\0';
+
+      DrawText(dc, m_curFG, m_curBG, mode_of(tline), col, line, seq_len, seq_buf);
     }
 
     inc_linepos(tlpos);
@@ -2039,9 +2197,7 @@ wxTerminal::DrawText(wxDC& dc, int fg_color, int bg_color, int flags,
   coord_y = y * m_charHeight; 
   coord_x = x * (m_charWidth);	
 
-  for (unsigned int i = 0; i < str.Length(); i++, coord_x += m_charWidth) {
-    dc.DrawText(str.Mid(i, 1), coord_x, coord_y);
-  }
+  dc.DrawText(str, coord_x, coord_y);
 }
 
 void
@@ -2385,16 +2541,27 @@ wxTerminal::PassInputToTerminal(int len, char *data)
       
       break;
     default:
-      InsertChar(data[i]);
+      {
+        // Determine byte-length of this UTF-8 sequence from the lead byte
+        unsigned char lead = (unsigned char)data[i];
+        int seq_len;
+        if      (lead < 0x80)            seq_len = 1;
+        else if ((lead & 0xE0) == 0xC0)  seq_len = 2;
+        else if ((lead & 0xF0) == 0xE0)  seq_len = 3;
+        else if ((lead & 0xF8) == 0xF0)  seq_len = 4;
+        else                             seq_len = 1; // continuation/invalid
 
+        // Store all bytes but advance the display cursor only once
+        for (int b = 0; b < seq_len && i + b < len; b++)
+          InsertChar(data[i + b]);
+        i += (seq_len - 1); // loop i++ handles the last byte
 
-      cursor_x++;
-      if(cursor_x > line_of(curr_line_pos).line_length) {
-	line_of(curr_line_pos).line_length = cursor_x;
+        cursor_x++;
+        if (cursor_x > line_of(curr_line_pos).line_length)
+          line_of(curr_line_pos).line_length = cursor_x;
+        if (cursor_x > x_max)
+          NextLine();
       }
-      if(cursor_x > x_max) {
-	NextLine();
-      }      
       break;
     }   
   }
