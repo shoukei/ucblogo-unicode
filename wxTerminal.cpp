@@ -1068,9 +1068,10 @@ void  wxTerminal::Flush (){
 void wxTerminal::PassInputToInterp() {
   int i;  
   if (logo_input_mode == LogoCharInputMode) {
-    //buff[buff_index++] = input_buffer[--input_index];
-    buff_push(input_buffer[--input_index]);
-    
+    /* Push all bytes of the UTF-8 sequence, not just the last one */
+    for (i = 0; i < input_index; i++) {
+      buff_push(input_buffer[i]);
+    }
     input_index = 0;
     input_current_pos = 0;
   }

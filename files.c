@@ -563,17 +563,29 @@ NODE *lreadrawline(NODE *args) {
 
 int readchar_lookahead_buf = -1;
 
+/* Return the number of UTF-8 continuation bytes that follow a leading byte. */
+static int utf8_extra_bytes(unsigned char b) {
+    if (b < 0x80) return 0;   /* ASCII */
+    if (b < 0xC0) return 0;   /* unexpected continuation -- treat as single byte */
+    if (b < 0xE0) return 1;
+    if (b < 0xF0) return 2;
+    return 3;
+}
+
 NODE *lreadchar(NODE *args) {
 #ifdef WIN32
     MSG msg;
 #endif /* WIN32 */
-    char c;
+    /* Buffer large enough for one UTF-8 codepoint (max 4 bytes) */
+    char cbuf[5];
+    int nbytes, extra, i;
 
     if (readchar_lookahead_buf >= 0) {
-	c = (char)readchar_lookahead_buf;
+	cbuf[0] = (char)readchar_lookahead_buf;
 	readchar_lookahead_buf = -1;
-	return(make_strnode((char *)&c, (struct string_block *)NULL, 1,
-		(getparity(c) ? BACKSLASH_STRING : STRING), strnzcpy));
+	/* lookahead is always a single ASCII byte from keyact/signal handling */
+	return(make_strnode(cbuf, (struct string_block *)NULL, 1,
+		(getparity(cbuf[0]) ? BACKSLASH_STRING : STRING), strnzcpy));
     }
     charmode_on();
     input_blocking++;
@@ -583,14 +595,40 @@ NODE *lreadchar(NODE *args) {
     {
 #ifdef HAVE_WX
 	if (interactive && readstream==stdin) {
+	    /* Keep reading_char_now set for the entire codepoint so the wx
+	     * layer does not echo any of its bytes to the terminal. */
 	    reading_char_now = 1;
-	    c = getFromWX();
+	    cbuf[0] = getFromWX();
+
+	    /* Read UTF-8 continuation bytes while still suppressing echo */
+	    extra = utf8_extra_bytes((unsigned char)cbuf[0]);
+	    nbytes = 1;
+	    for (i = 0; i < extra; i++) {
+		int next = (unsigned char)getFromWX();
+		if (next == EOF) break;
+		cbuf[nbytes++] = (char)next;
+	    }
 	    reading_char_now = 0;
 	}
-	else
-	    c = (char)sysGetC(readstream);
+	else {
+	    cbuf[0] = (char)sysGetC(readstream);
+	    extra = utf8_extra_bytes((unsigned char)cbuf[0]);
+	    nbytes = 1;
+	    for (i = 0; i < extra; i++) {
+		int next = sysGetC(readstream);
+		if (next == EOF) break;
+		cbuf[nbytes++] = (char)next;
+	    }
+	}
 #else
-	c = (char)sysGetC(readstream);
+	cbuf[0] = (char)sysGetC(readstream);
+	extra = utf8_extra_bytes((unsigned char)cbuf[0]);
+	nbytes = 1;
+	for (i = 0; i < extra; i++) {
+	    int next = sysGetC(readstream);
+	    if (next == EOF) break;
+	    cbuf[nbytes++] = (char)next;
+	}
 #endif /* wx */
     }
     input_blocking = 0;
@@ -601,16 +639,17 @@ NODE *lreadchar(NODE *args) {
 #endif
 	return(NIL);
     }
-    return(make_strnode((char *)&c, (struct string_block *)NULL, 1,
-	    (getparity(c) ? BACKSLASH_STRING : STRING), strnzcpy));
+
+    return(make_strnode(cbuf, (struct string_block *)NULL, nbytes,
+	    STRING, strnzcpy));
 }
 
 NODE *lreadchars(NODE *args) {
     unsigned int c, i;
     struct string_block *strhead = NULL;
-    char *strptr= NULL;
-    NODETYPES type = STRING;
+    char *strptr = NULL;
     char *cp;
+    int nbytes = 0;
 
     c = (unsigned int)getint(pos_int_arg(args));
     if (stopping_flag == THROWING) return UNBOUND;
@@ -620,38 +659,65 @@ NODE *lreadchars(NODE *args) {
     if (!setjmp(iblk_buf))
 #endif
     {
-	strhead = malloc((size_t)(c + sizeof(FIXNUM) + 1));
+	/* Allocate worst-case: 4 bytes per codepoint */
+	strhead = malloc((size_t)(c * 4 + sizeof(FIXNUM) + 1));
 	if (strhead == NULL) {
 	    err_logo(FILE_ERROR, make_static_strnode(message_texts[MEM_LOW]));
 	    return UNBOUND;
 	}
 	strptr = strhead->str_str;
+	cp = strptr;
+
+	/* Read exactly c Unicode codepoints one at a time */
+	for (i = 0; i < c; i++) {
+	    int first, extra, j;
 #ifdef HAVE_WX
-	if (interactive && readstream==stdin) {
-	    reading_char_now = 1;
-	    cp=strptr;
-	    for (i=c; i != 0; --i) {
-		*cp++ = getFromWX();
-	    }
-	    reading_char_now = 0;
-	} else
-	    c = (unsigned int)fread(strptr, 1, (size_t)c, readstream);
+	    if (interactive && readstream==stdin) {
+		/* Keep reading_char_now set across the whole codepoint */
+		reading_char_now = 1;
+		first = (unsigned char)getFromWX();
+	    } else
+		first = sysGetC(readstream);
 #else
-	c = (unsigned int)fread(strptr, 1, (size_t)c, readstream);
+	    first = sysGetC(readstream);
 #endif
+	    if (first == EOF) break;
+	    *cp++ = (char)first;
+	    nbytes++;
+
+	    /* Read continuation bytes for this codepoint */
+	    extra = utf8_extra_bytes((unsigned char)first);
+	    for (j = 0; j < extra; j++) {
+		int next;
+#ifdef HAVE_WX
+		if (interactive && readstream==stdin)
+		    next = (unsigned char)getFromWX();
+		else
+		    next = sysGetC(readstream);
+#else
+		next = sysGetC(readstream);
+#endif
+		if (next == EOF) break;
+		*cp++ = (char)next;
+		nbytes++;
+	    }
+#ifdef HAVE_WX
+	    /* Clear the flag only after each complete codepoint */
+	    if (interactive && readstream==stdin)
+		reading_char_now = 0;
+#endif
+	}
 	setstrrefcnt(strhead, 0);
     }
     input_blocking = 0;
 #ifndef TIOCSTI
     if (stopping_flag == THROWING) return(UNBOUND);
 #endif
-    if (c <= 0) {
+    if (nbytes <= 0) {
 	free(strhead);
 	return(NIL);
     }
-    for (i = 0; i < c; i++)
-	if (getparity(strptr[i])) type = BACKSLASH_STRING;
-    return(make_strnode(strptr, strhead, (int)c, type, strnzcpy));
+    return(make_strnode(strptr, strhead, nbytes, STRING, strnzcpy));
 }
 
 NODE *leofp(NODE *args) {
