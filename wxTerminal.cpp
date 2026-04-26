@@ -7,7 +7,7 @@
 #endif
 
 #include <iostream>
-
+#include <string>
 #ifdef __GNUG__
     #pragma implementation "wxTerminal.h"
 #endif
@@ -1115,7 +1115,7 @@ void wxTerminal::DoCopy(){
 void wxTerminal::DoPaste(){
 	if (wxTheClipboard->Open())
 	{
-		if (wxTheClipboard->IsSupported( wxDF_TEXT ))
+          if ((wxTheClipboard->IsSupported( wxDF_TEXT )) || (wxTheClipboard->IsSupported(wxDF_UNICODETEXT)))
 		{
 		  wxClientDC dc(this);
 		  wxTextDataObject data;
@@ -1126,15 +1126,32 @@ void wxTerminal::DoPaste(){
 		  wxCharBuffer utf8text = s.utf8_str();
 		  const char *utf8ptr = utf8text.data();
 		  int utf8len = (int)strlen(utf8ptr);
-		  char prev = ' ';
-		  for (int i = 0; i < utf8len && input_index < MAXINBUFF; i++) {
-		    char c = utf8ptr[i];
-		    if (c == '\n') num_newlines++;
-		    if (prev == ' ' && c == ' ') continue;
-		    prev = c;
-		    input_buffer[input_index++] = c;
+
+		  for (int i = 0; i < utf8len && input_index < MAXINBUFF; ) {
+		    // Determine the byte length of this UTF-8 codepoint
+		    unsigned char lead = (unsigned char)utf8ptr[i];
+		    int seq_len;
+		    if      (lead < 0x80)           seq_len = 1;
+		    else if ((lead & 0xE0) == 0xC0) seq_len = 2;
+		    else if ((lead & 0xF0) == 0xE0) seq_len = 3;
+		    else if ((lead & 0xF8) == 0xF0) seq_len = 4;
+		    else                            seq_len = 1; // continuation/invalid byte
+
+		    // Make sure the full sequence fits in the input buffer
+		    if (input_index + seq_len > MAXINBUFF) break;
+
+		    // Copy the full codepoint into input_buffer
+		    for (int b = 0; b < seq_len && i + b < utf8len; b++) {
+		      char c = utf8ptr[i + b];
+		      if (c == '\n') num_newlines++;
+		      input_buffer[input_index++] = c;
+		    }
+
+		    // Echo the full codepoint to the terminal at once
 		    ClearSelection();
-		    PassInputToTerminal(1, &c);
+		    PassInputToTerminal(seq_len, (char *)(utf8ptr + i));
+
+		    i += seq_len;
 		  }
 		  m_inputLines = num_newlines;
 		  input_current_pos = input_index;
@@ -2069,19 +2086,37 @@ wxTerminal::GetChars(int x1, int y1, int x2, int y2)
     return ret;
   }
 
-  wxterm_charpos a = GetCharPosition(0,y1);
+  /* Helper lambda: advance a charpos by `cols` codepoints (not bytes),
+   * returning the resulting charpos at the start of that column. */
+  auto advance_cols = [](wxterm_charpos pos, int cols) -> wxterm_charpos {
+    for (int c = 0; c < cols; ) {
+      unsigned char lead = (unsigned char)char_of(pos);
+      int seq_len;
+      if      (lead == 0)               break;  // end of line
+      else if (lead < 0x80)             seq_len = 1;
+      else if ((lead & 0xE0) == 0xC0)   seq_len = 2;
+      else if ((lead & 0xF0) == 0xE0)   seq_len = 3;
+      else if ((lead & 0xF8) == 0xF0)   seq_len = 4;
+      else                              seq_len = 1;
+      for (int b = 0; b < seq_len; b++)
+        inc_charpos(pos);
+      c++;
+    }
+    return pos;
+  };
 
-  a.offset = a.offset + min(x1, max(0,a.line_length - 1)); 
-  adjust_charpos(a);
+  /* Get byte-accurate start position by walking codepoints from line start */
+  wxterm_charpos a = GetCharPosition(0, y1);
+  a = advance_cols(a, min(x1, max(0, a.line_length - 1)));
 
-  wxterm_charpos b = GetCharPosition(0,min(y2, y_max));
-  
-  b.offset = b.offset + min(x2, b.line_length); 
-  adjust_charpos(b);
+  wxterm_charpos b = GetCharPosition(0, min(y2, y_max));
+  b = advance_cols(b, min(x2, b.line_length));
+
+  /* Collect raw UTF-8 bytes into a std::string, then convert once */
+  std::string raw;
 
   while(a.buf != b.buf) {
-    //  size 10, offset 5,  copy 10-5=5 chars... yup
-    ret.Append(wxString::FromAscii(a.buf->cbuf+a.offset, WXTERM_CB_SIZE-a.offset));
+    raw.append(a.buf->cbuf+a.offset, WXTERM_CB_SIZE-a.offset);
     if(a.buf->next) {
       a.offset = 0;
       a.buf = a.buf->next;
@@ -2089,9 +2124,13 @@ wxTerminal::GetChars(int x1, int y1, int x2, int y2)
     else {
       //bad
       fprintf(stderr, "BAD (getchars)\n");
+      break;
     }
   }
-  ret.Append(wxString::FromAscii(a.buf->cbuf+a.offset, b.offset - a.offset));
+  if (b.offset > a.offset)
+    raw.append(a.buf->cbuf+a.offset, b.offset - a.offset);
+
+  ret = wxString::FromUTF8(raw.c_str(), raw.size());
   return ret;
 }
 
