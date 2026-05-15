@@ -28,8 +28,15 @@ modified to work with unicode characters.
 	あ い う え お
 ```
 
-Since I use logo mostly from the terminal, with only occasional graphics 
-I am running an X11 version without wxwidgets, building ucblogo like this:
+To build the wxWidgets version on a Mac:
+
+```
+	autoreconf --install
+	./configure
+	make ucblogo.dmg
+```
+
+To use ucblogo from the terminal, or from a text editor like Emacs, displaying graphics on a separate X11 window. (On Macs you need to install XQuartz first):
 
 ```
 	autoreconf --install
