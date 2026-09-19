@@ -295,6 +295,7 @@ public:
   //TurtleCanvas passes char to here.
   void OnChar(wxKeyEvent& event);
 
+  void RewriteLineFromCursor(const char *data, int len, int char_count);
   void handle_backspace();
   void handle_home();
   void handle_end();
@@ -323,6 +324,7 @@ private:
   void OnLeftUp(wxMouseEvent& event);
   void OnMouseMove(wxMouseEvent& event);
   void LoseFocus (wxFocusEvent & event);
+  void OnFocus (wxFocusEvent & event);
   
   DECLARE_EVENT_TABLE()
 };

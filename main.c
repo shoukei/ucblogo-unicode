@@ -29,6 +29,7 @@
 
 #include "logo.h"
 #include "globals.h"
+#include <locale.h>
 
 #ifdef HAVE_TERMIO_H
 #ifdef HAVE_WX
@@ -209,6 +210,8 @@ int main(int argc, char *argv[]) {
     char **argv2;
 
     bottom_stack = &exec_list; /*GC*/
+
+    setlocale(LC_ALL, "");
 
 #ifndef HAVE_WX
 #ifdef x_window

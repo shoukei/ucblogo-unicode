@@ -48,6 +48,9 @@ if WX
 ucblogo_SOURCES += wxMain.cpp wxTerminal.cpp wxCommandHistory.cpp wxTurtleGraphics.cpp
 ucblogo_SOURCES += TextEditor.cpp
 ucblogo_SOURCES += wxterm.c
+if MACOSX
+ucblogo_SOURCES += wxTerminalIME.mm
+endif
 else
 # do not need C++ linker, no good way to avoid it though
 ucblogo_SOURCES += term.c

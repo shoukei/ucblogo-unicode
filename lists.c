@@ -25,6 +25,70 @@
 #include "globals.h"
 #include <math.h>
 
+/* UTF-8 utility functions
+ *
+ * Logo treats each Unicode codepoint as one "character".
+ * UTF-8 encodes codepoints as 1-4 bytes:
+ *   0xxxxxxx                             (U+0000..U+007F)  1 byte
+ *   110xxxxx 10xxxxxx                    (U+0080..U+07FF)  2 bytes
+ *   1110xxxx 10xxxxxx 10xxxxxx           (U+0800..U+FFFF)  3 bytes
+ *   11110xxx 10xxxxxx 10xxxxxx 10xxxxxx  (U+10000..U+10FFFF) 4 bytes
+ *
+ * A continuation byte has the pattern 10xxxxxx (0x80..0xBF).
+ */
+
+/* Return the byte-length of the UTF-8 sequence whose leading byte is b. */
+static int utf8_char_bytes(unsigned char b) {
+    if (b < 0x80) return 1;   /* ASCII */
+    if (b < 0xC0) return 1;   /* unexpected continuation byte -- treat as 1 */
+    if (b < 0xE0) return 2;
+    if (b < 0xF0) return 3;
+    return 4;
+}
+
+/* Is this byte a UTF-8 continuation byte (10xxxxxx)? */
+#define utf8_is_cont(b) (((unsigned char)(b) & 0xC0) == 0x80)
+
+/* Count Unicode codepoints in a byte string of length nbytes.
+ * Each non-continuation byte starts a new codepoint. */
+static int utf8_strlen(const char *s, int nbytes) {
+    int count = 0, i = 0;
+    while (i < nbytes) {
+        if (!utf8_is_cont((unsigned char)s[i]))
+            count++;
+        i++;
+    }
+    return count;
+}
+
+/* Return the byte offset of the n-th logical character (1-based).
+ * Returns nbytes if n exceeds the number of codepoints. */
+static int utf8_byte_offset(const char *s, int nbytes, int n) {
+    int i = 0, count = 0;
+    while (i < nbytes) {
+        if (!utf8_is_cont((unsigned char)s[i])) {
+            count++;
+            if (count == n) return i;
+        }
+        i++;
+    }
+    return nbytes;
+}
+
+/* Return the byte length of the codepoint that starts at byte offset off. */
+static int utf8_seq_len(const char *s, int nbytes, int off) {
+    if (off >= nbytes) return 0;
+    return utf8_char_bytes((unsigned char)s[off]);
+}
+
+/* Return the byte offset of the last codepoint's leading byte. */
+static int utf8_last_char_offset(const char *s, int nbytes) {
+    int i = nbytes - 1;
+    while (i > 0 && utf8_is_cont((unsigned char)s[i]))
+        i--;
+    return i;
+}
+
 NODE *bfable_arg(NODE *args) {
     NODE *arg = car(args);
 
@@ -54,12 +118,14 @@ NODE *lbutfirst(NODE *args) {
 	if (is_list(arg))
 	    val = cdr(arg);
 	else {
+	    int skip;
 	    setcar(args, cnv_node_to_strnode(arg));
 	    arg = car(args);
-	    if (getstrlen(arg) > 1)
-		val = make_strnode(getstrptr(arg) + 1,
+	    skip = utf8_char_bytes((unsigned char)*getstrptr(arg));
+	    if (getstrlen(arg) > skip)
+		val = make_strnode(getstrptr(arg) + skip,
 			  getstrhead(arg),
-			  getstrlen(arg) - 1,
+			  getstrlen(arg) - skip,
 			  nodetype(arg),
 			  strnzcpy);
 	    else
@@ -90,12 +156,14 @@ NODE *lbutlast(NODE *args) {
 		if (check_throwing) break;
 	    }
 	} else {
+	    int last_off;
 	    setcar(args, cnv_node_to_strnode(arg));
 	    arg = car(args);
-	    if (getstrlen(arg) > 1)
+	    last_off = utf8_last_char_offset(getstrptr(arg), getstrlen(arg));
+	    if (last_off > 0)
 		val = make_strnode(getstrptr(arg),
 			  getstrhead(arg),
-			  getstrlen(arg) - 1,
+			  last_off,
 			  nodetype(arg),
 			  strnzcpy);
 	    else
@@ -116,9 +184,11 @@ NODE *lfirst(NODE *args) {
 	if (is_list(arg))
 	    val = car(arg);
 	else {
+	    int first_len;
 	    setcar(args, cnv_node_to_strnode(arg));
 	    arg = car(args);
-	    val = make_strnode(getstrptr(arg), getstrhead(arg), 1,
+	    first_len = utf8_char_bytes((unsigned char)*getstrptr(arg));
+	    val = make_strnode(getstrptr(arg), getstrhead(arg), first_len,
 			       nodetype(arg), strnzcpy);
 	}
     }
@@ -179,10 +249,13 @@ NODE *llast(NODE *args) {
 	    val = car(args);
 	}
 	else {
+	    int last_off, last_len;
 	    setcar(args, cnv_node_to_strnode(arg));
 	    arg = car(args);
-	    val = make_strnode(getstrptr(arg) + getstrlen(arg) - 1,
-			       getstrhead(arg), 1, nodetype(arg), strnzcpy);
+	    last_off = utf8_last_char_offset(getstrptr(arg), getstrlen(arg));
+	    last_len = utf8_char_bytes((unsigned char)getstrptr(arg)[last_off]);
+	    val = make_strnode(getstrptr(arg) + last_off,
+			       getstrhead(arg), last_len, nodetype(arg), strnzcpy);
 	}
     }
     return(val);
@@ -200,7 +273,9 @@ NODE *char_arg(NODE *args) {
     NODE *arg = car(args), *val;
 
     val = cnv_node_to_strnode(arg);
-    while ((val == UNBOUND || getstrlen(val) != 1) && NOT_THROWING) {
+    /* Accept a string that is exactly one Unicode codepoint (may be 1-4 bytes) */
+    while ((val == UNBOUND ||
+	    utf8_strlen(getstrptr(val), getstrlen(val)) != 1) && NOT_THROWING) {
 	setcar(args, err_logo(BAD_DATA, arg));
 	arg = car(args);
 	val = cnv_node_to_strnode(arg);
@@ -277,7 +352,7 @@ NODE *lcount(NODE *args) {
 	    cnt = getarrdim(arg);
 	} else {
 	    setcar(args, cnv_node_to_strnode(arg));
-	    cnt = getstrlen(car(args));
+	    cnt = utf8_strlen(getstrptr(car(args)), getstrlen(car(args)));
 	}
     }
     return(make_intnode((FIXNUM)cnt));
@@ -286,9 +361,11 @@ NODE *lcount(NODE *args) {
 NODE *lfput(NODE *args) {
     NODE *lst, *arg;
 
-    if (is_word(cadr(args)) && is_word(car(args)) &&
-	    getstrlen(cnv_node_to_strnode(car(args))) == 1)
-	return lword(args);
+    if (is_word(cadr(args)) && is_word(car(args))) {
+	NODE *s = cnv_node_to_strnode(car(args));
+	if (utf8_strlen(getstrptr(s), getstrlen(s)) == 1)
+	    return lword(args);
+    }
 
     arg = car(args);
     lst = list_arg(cdr(args));
@@ -301,9 +378,11 @@ NODE *lfput(NODE *args) {
 NODE *llput(NODE *args) {
     NODE *lst, *arg, *val = UNBOUND, *lastnode = NIL, *tnode = NIL;
 
-    if (is_word(cadr(args)) && is_word(car(args)) &&
-	    getstrlen(cnv_node_to_strnode(car(args))) == 1)
-	return lword(cons(cadr(args), cons(car(args), NIL)));
+    if (is_word(cadr(args)) && is_word(car(args))) {
+	NODE *s = cnv_node_to_strnode(car(args));
+	if (utf8_strlen(getstrptr(s), getstrlen(s)) == 1)
+	    return lword(cons(cadr(args), cons(car(args), NIL)));
+    }
 
     arg = car(args);
     lst = list_arg(cdr(args));
@@ -461,8 +540,10 @@ NODE *memberp_help(NODE *args, BOOLEAN notp, BOOLEAN substr) {
 	tmp = NIL;
 	if (obj1 != UNBOUND && obj2 != UNBOUND &&
 	    getstrlen(obj1) <= getstrlen(obj2) &&
-	    (substr || (getstrlen(obj1) == 1))) {
-	    leng = getstrlen(obj2) - getstrlen(obj1);
+	    (substr || (utf8_strlen(getstrptr(obj1), getstrlen(obj1)) == 1))) {
+	    /* leng = number of codepoint positions to try */
+	    leng = utf8_strlen(getstrptr(obj2), getstrlen(obj2)) -
+		   utf8_strlen(getstrptr(obj1), getstrlen(obj1));
 	    setcar(cdr(args),make_strnode(getstrptr(obj2), getstrhead(obj2),
 					  getstrlen(obj1), nodetype(obj2),
 					  strnzcpy));
@@ -470,11 +551,19 @@ NODE *memberp_help(NODE *args, BOOLEAN notp, BOOLEAN substr) {
 	    for (i = 0; i <= leng; i++) {
 		if (equalp_help(obj1, tmp, caseig)) {
 		    if (notp) {
-			setstrlen(tmp,leng+getstrlen(obj1)-i);
+			/* remaining bytes from current window to end of obj2 */
+			int remaining = getstrlen(obj2) -
+			    (int)(getstrptr(tmp) - getstrptr(obj2));
+			setstrlen(tmp, remaining);
 			return tmp;
 		    } else return TrueName();
 		}
-		setstrptr(tmp, getstrptr(tmp) + 1);
+		/* advance window by one full UTF-8 codepoint */
+		{
+		    int step = utf8_char_bytes((unsigned char)*getstrptr(tmp));
+		    setstrptr(tmp, getstrptr(tmp) + step);
+		    setstrlen(tmp, getstrlen(tmp) - step);
+		}
 	    }
 	}
 	return (notp ? Null_Word : FalseName());
@@ -562,18 +651,22 @@ NODE *litem(NODE *args) {
 	    return (getarrptr(obj))[i];
 	}
 	else {
+	    int byte_off, char_len, nchars;
 	    if (i <= 0) {
 		err_logo(BAD_DATA_UNREC, val);
 		return UNBOUND;
 	    }
 	    setcar (cdr(args), cnv_node_to_strnode(obj));
 	    obj = cadr(args);
-	    if (i > getstrlen(obj)) {
+	    nchars = utf8_strlen(getstrptr(obj), getstrlen(obj));
+	    if (i > nchars) {
 		err_logo(BAD_DATA_UNREC, val);
 		return UNBOUND;
 	    }
-	    return make_strnode(getstrptr(obj) + i - 1, getstrhead(obj),
-				1, nodetype(obj), strnzcpy);
+	    byte_off = utf8_byte_offset(getstrptr(obj), getstrlen(obj), i);
+	    char_len = utf8_seq_len(getstrptr(obj), getstrlen(obj), byte_off);
+	    return make_strnode(getstrptr(obj) + byte_off, getstrhead(obj),
+				char_len, nodetype(obj), strnzcpy);
 	}
     }
     return(UNBOUND);

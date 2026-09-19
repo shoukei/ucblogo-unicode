@@ -11,6 +11,7 @@ AC_LANG([C])
 dnl Checks for programs.
 AC_PROG_CC
 AC_PROG_CXX
+AC_PROG_OBJCXX
 
 dnl Process Options
 
@@ -141,6 +142,10 @@ AC_SUBST(TERMFILE)
 AC_SUBST(LINKER)
 AC_SUBST(GRAPHICSOFILE)
 AC_SUBST(GRAPHICSFILE)
+
+dnl Detect macOS for Objective-C++ IME support file
+AC_CANONICAL_HOST
+AM_CONDITIONAL([MACOSX], [case "$host_os" in darwin*) true;; *) false;; esac])
 
 AC_CONFIG_FILES([Makefile docs/Makefile logolib/Makefile csls/Makefile helpfiles/Makefile tests/Makefile])
 AC_OUTPUT

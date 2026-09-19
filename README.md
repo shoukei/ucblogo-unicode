@@ -1,5 +1,50 @@
 # UCBLogo
 
+## About this fork
+
+This is a fork of https://github.com/jrincayc/ucblogo-code
+modified to work with unicode characters.
+
+```
+	? pr first "あいうえお
+	あ
+	? pr butfirst "あいうえお
+	いうえお
+	? pr last "あいうえお
+	お
+	? pr butlast "あいうえお
+	あいうえ
+	? pr count "あいうえお
+	5
+	? pr item 3 "あいうえお
+	う
+	? pr memberp "あ [あ い う]
+	true
+	? pr memberp "か [あ い う]
+	false
+	? pr fput "あ [い う え お]
+	あ い う え お
+	? pr lput "お [あ い う え]
+	あ い う え お
+```
+
+To build the wxWidgets version on a Mac:
+
+```
+	autoreconf --install
+	./configure
+	make ucblogo.dmg
+```
+
+To use ucblogo from the terminal, or from a text editor like Emacs, displaying graphics on a separate X11 window. (On Macs you need to install XQuartz first):
+
+```
+	autoreconf --install
+	./configure --enable-x11 --enable-objects
+	make
+```
+
+
 ## Berkeley Logo interpreter
 
 This is a free (both senses) interpreter for the Logo programming language.
